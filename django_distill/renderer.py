@@ -39,19 +39,23 @@ class DistillRender(object):
     def render(self):
         for distill_func, file_name, view_name, a, k in self.urls_to_distill:
             for param_set in self.get_uri_values(distill_func):
+                render_error = None
                 if not param_set:
                     param_set = ()
                 elif self._is_str(param_set):
                     param_set = param_set,
                 uri = self.generate_uri(view_name, param_set)
-                render = self.render_view(uri, param_set, a)
+                try:
+                    render = self.render_view(uri, param_set, a)
+                except Exception as err:
+                    render_error = err
                 # rewrite URIs ending with a slash to ../index.html
                 if file_name is None and uri.endswith('/'):
                     if uri.startswith('/'):
                         uri = uri[1:]
-                    yield uri, uri + 'index.html', render
+                    yield uri, uri + 'index.html', render, render_error
                     continue
-                yield uri, file_name, render
+                yield uri, file_name, render, render_error
 
     def _is_str(self, s):
         return isinstance(s, six.string_types)
@@ -147,37 +151,41 @@ def load_urls(stdout):
 
 
 def render_to_dir(output_dir, urls_to_distill, stdout):
+    errors_list = []
     mimes = {}
     load_urls(stdout)
     renderer = DistillRender(output_dir, urls_to_distill)
-    for page_uri, file_name, http_response in renderer.render():
-        if file_name:
-            local_uri = file_name
-            full_path = os.path.join(output_dir, file_name)
-        else:
-            local_uri = page_uri
-            if page_uri.startswith(os.sep):
-                page_uri = page_uri[1:]
-            full_path = os.path.join(output_dir, page_uri)
-        content = http_response.content
-        mime = http_response.get('Content-Type')
-        renamed = ' (renamed from "{}")'.format(page_uri) if file_name else ''
-        msg = 'Rendering page: {} -> {} ["{}", {} bytes] {}'
-        stdout(msg.format(local_uri, full_path, mime, len(content), renamed))
-        try:
-            dirname = os.path.dirname(full_path)
-            if not os.path.isdir(dirname):
-                os.makedirs(dirname)
-            with open(full_path, 'wb') as f:
-                f.write(content)
-        except IOError as e:
-            if e.errno == errno.EISDIR:
-                err = ('Output path: {} is a directory! Try adding a '
-                       '"distill_file" arg to your distill_url()')
-                raise DistillError(err.format(full_path))
+    for page_uri, file_name, http_response, render_error in renderer.render():
+        if not render_error:
+            if file_name:
+                local_uri = file_name
+                full_path = os.path.join(output_dir, file_name)
             else:
-                raise
-        mimes[full_path] = mime.split(';')[0].strip()
+                local_uri = page_uri
+                if page_uri.startswith(os.sep):
+                    page_uri = page_uri[1:]
+                full_path = os.path.join(output_dir, page_uri)
+            content = http_response.content
+            mime = http_response.get('Content-Type')
+            renamed = ' (renamed from "{}")'.format(page_uri) if file_name else ''
+            msg = 'Rendering page: {} -> {} ["{}", {} bytes] {}'
+            stdout(msg.format(local_uri, full_path, mime, len(content), renamed))
+            try:
+                dirname = os.path.dirname(full_path)
+                if not os.path.isdir(dirname):
+                    os.makedirs(dirname)
+                with open(full_path, 'wb') as f:
+                    f.write(content)
+            except IOError as e:
+                if e.errno == errno.EISDIR:
+                    err = ('Output path: {} is a directory! Try adding a '
+                           '"distill_file" arg to your distill_url()')
+                    raise DistillError(err.format(full_path))
+                else:
+                    raise
+            mimes[full_path] = mime.split(';')[0].strip()
+        else:
+            errors_list.append(f' RENDER ERROR: {render_error} in file {page_uri} ---- error end')
     static_url = settings.STATIC_URL
     static_url = static_url[1:] if static_url.startswith('/') else static_url
     static_output_dir = os.path.join(output_dir, static_url)
@@ -191,6 +199,11 @@ def render_to_dir(output_dir, urls_to_distill, stdout):
         for file_from, file_to in renderer.copy_static(settings.MEDIA_URL,
                                                        media_output_dir):
             stdout('Copying media: {} -> {}'.format(file_from, file_to))
+
+    print(f' ------------- {len(errors_list)}  errors ---------')
+    for err in errors_list:
+        print(err)
+
     return True
 
 
